@@ -1,0 +1,80 @@
+
+name: UltraKiosk for iPad Air 2 (iPadOS 15.8)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipados15:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -switch /Applications/Xcode_16.4.app
+
+      - name: Lower iPad deployment target to iPadOS 15.8
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          project = Path('UltraKiosk.xcodeproj/project.pbxproj')
+          src = project.read_text(encoding='utf-8')
+          normal = 'IPHONEOS_DEPLOYMENT_TARGET = 17.6;'
+          arch = '"IPHONEOS_DEPLOYMENT_TARGET[arch=*]" = 17.6;'
+          if src.count(normal) != 2 or src.count(arch) != 2:
+              raise SystemExit('The Xcode project changed upstream; verify deployment target manually.')
+          src = src.replace(normal, 'IPHONEOS_DEPLOYMENT_TARGET = 15.8;')
+          src = src.replace(arch, '"IPHONEOS_DEPLOYMENT_TARGET[arch=*]" = 15.8;')
+          project.write_text(src, encoding='utf-8')
+          manifest = Path('Package.swift')
+          src = manifest.read_text(encoding='utf-8')
+          if '.iOS(.v17)' in src:
+              manifest.write_text(src.replace('.iOS(.v17)', '.iOS(.v15)'), encoding='utf-8')
+          PY
+
+      - name: Build unsigned IPA for real iPad hardware
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project UltraKiosk.xcodeproj \
+            -scheme UltraKiosk \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/ultrakiosk-build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
+            OTHER_SWIFT_FLAGS='-D ED_SKIP_SWIFT_FORMAT' \
+            build 2>&1 | tee "$RUNNER_TEMP/ultrakiosk-build.log"
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$RUNNER_TEMP/ultrakiosk-build/Build/Products/Release-iphoneos/UltraKiosk.app" \
+            "$RUNNER_TEMP/ipa/Payload/UltraKiosk.app"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry "$GITHUB_WORKSPACE/UltraKiosk-iPadAir2-unsigned.ipa" Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: UltraKiosk-iPadAir2-unsigned-IPA
+          path: UltraKiosk-iPadAir2-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload build log (also on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/ultrakiosk-build.log
+          if-no-files-found: ignore
